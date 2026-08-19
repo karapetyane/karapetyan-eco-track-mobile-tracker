@@ -50,6 +50,18 @@ object NmeaBuilder {
         return withChecksum(body)
     }
 
+    /**
+     * Battery percentage sentence: `$PBAT,<0-100>*CS`
+     * Example body before checksum: `PBAT,67`
+     */
+    fun pbat(batteryLevelPercent: Int): String {
+        require(batteryLevelPercent in 0..100) {
+            "batteryLevelPercent must be 0..100, was $batteryLevelPercent"
+        }
+        val body = "PBAT,$batteryLevelPercent"
+        return withChecksum(body)
+    }
+
     private fun withChecksum(body: String): String {
         var cs = 0
         for (c in body) cs = cs xor c.code

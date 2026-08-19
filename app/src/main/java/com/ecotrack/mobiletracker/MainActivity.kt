@@ -31,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lastLatText: TextView
     private lateinit var lastLonText: TextView
     private lateinit var lastSentText: TextView
+    private lateinit var batteryText: TextView
+    private lateinit var pendingText: TextView
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -44,6 +46,13 @@ class MainActivity : AppCompatActivity() {
             lastLatText.text = "Last latitude: " + (if (lat.isNaN()) "-" else lat.toString())
             lastLonText.text = "Last longitude: " + (if (lon.isNaN()) "-" else lon.toString())
             lastSentText.text = "Last sent: $lastSent"
+
+            if (intent.hasExtra(TrackerService.EXTRA_BATTERY_PERCENT)) {
+                val pct = intent.getIntExtra(TrackerService.EXTRA_BATTERY_PERCENT, -1)
+                batteryText.text = if (pct in 0..100) "Մարտկոց: $pct%" else "Մարտկոց: -"
+            }
+            val pending = intent.getIntExtra(TrackerService.EXTRA_PENDING_COUNT, 0)
+            pendingText.text = "Անցանց կետեր: $pending"
         }
     }
 
@@ -62,6 +71,8 @@ class MainActivity : AppCompatActivity() {
         lastLatText = findViewById(R.id.lastLatText)
         lastLonText = findViewById(R.id.lastLonText)
         lastSentText = findViewById(R.id.lastSentText)
+        batteryText = findViewById(R.id.batteryText)
+        pendingText = findViewById(R.id.pendingText)
 
         val settings = settingsStore.load()
         hostEdit.setText(settings.host)

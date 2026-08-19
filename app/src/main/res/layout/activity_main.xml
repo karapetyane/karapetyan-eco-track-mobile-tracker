@@ -99,6 +99,18 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Last sent: -" />
+
+        <TextView
+            android:id="@+id/batteryText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Մարտկոց: -" />
+
+        <TextView
+            android:id="@+id/pendingText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Անցանց կետեր: 0" />
     </LinearLayout>
 </ScrollView>
 
