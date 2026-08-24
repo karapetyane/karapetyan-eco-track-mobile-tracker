@@ -9,8 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.location.Location
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ecotrack.mobiletracker.MainActivity
@@ -31,11 +33,39 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TrackerService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private var job: Job? = null
+    private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private var heartbeatStarted = false
+    private val heartbeatInFlight = AtomicBoolean(false)
+    private val heartbeatIoTimedOut = AtomicBoolean(false)
+    private val heartbeatIoTimeoutRunnable = Runnable {
+        if (!heartbeatIoTimedOut.compareAndSet(false, true)) return@Runnable
+        Log.i(TAG, "PBAT heartbeat failed: timeout")
+        try { transport?.close() } catch (_: Exception) {}
+    }
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (!heartbeatStarted) return
+            Log.i(TAG, "PBAT heartbeat tick")
+            heartbeatHandler.postDelayed(this, PBAT_HEARTBEAT_MS)
+            scope.launch {
+                if (!heartbeatInFlight.compareAndSet(false, true)) {
+                    Log.i(TAG, "PBAT heartbeat skip: previous tick still running")
+                    return@launch
+                }
+                try {
+                    sendPbatHeartbeatBestEffort()
+                } finally {
+                    heartbeatInFlight.set(false)
+                }
+            }
+        }
+    }
 
     private lateinit var stateStore: TrackingStateStore
     private lateinit var pointStore: RoomOfflinePointStore
@@ -52,6 +82,7 @@ class TrackerService : Service() {
     private var locationUpdatesActive = false
     private var lastAcceptedElapsedRealtimeNanos: Long = 0L
     private var lastAcceptedTimeMillis: Long = 0L
+    private var trackingWakeLock: PowerManager.WakeLock? = null
 
     private val fusedClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
 
@@ -91,8 +122,10 @@ class TrackerService : Service() {
 
     override fun onDestroy() {
         job?.cancel()
+        stopPbatHeartbeat()
         stopLocationUpdates()
         transport?.close()
+        releaseTrackingWakeLock()
         super.onDestroy()
     }
 
@@ -136,6 +169,7 @@ class TrackerService : Service() {
 
     private fun startLoop(clearPreviousSessionQueue: Boolean) {
         job?.cancel()
+        stopPbatHeartbeat()
         stopLocationUpdates()
         transport?.close()
         lastAcceptedElapsedRealtimeNanos = 0L
@@ -149,6 +183,7 @@ class TrackerService : Service() {
             transport = tcp,
         )
         coordinator = coord
+        acquireTrackingWakeLock()
 
         job = scope.launch {
             if (clearPreviousSessionQueue) {
@@ -157,6 +192,27 @@ class TrackerService : Service() {
             }
             broadcastStatus("Starting…", null, null, "-", null, coord.pendingCount())
             startLocationUpdates()
+        }
+        startPbatHeartbeat()
+    }
+
+    private fun acquireTrackingWakeLock() {
+        val held = trackingWakeLock
+        if (held?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ecotrack:tracking")
+        wl.setReferenceCounted(false)
+        wl.acquire()
+        trackingWakeLock = wl
+        Log.i(TAG, "wake lock acquired")
+    }
+
+    private fun releaseTrackingWakeLock() {
+        val wl = trackingWakeLock ?: return
+        trackingWakeLock = null
+        if (wl.isHeld) {
+            wl.release()
+            Log.i(TAG, "wake lock released")
         }
     }
 
@@ -182,6 +238,55 @@ class TrackerService : Service() {
         } catch (_: SecurityException) {
             Log.w(TAG, "Location updates not started: missing permission")
             gpsDiag("GPS permission error")
+        }
+    }
+
+    private fun startPbatHeartbeat() {
+        stopPbatHeartbeat()
+        heartbeatStarted = true
+        heartbeatHandler.postDelayed(heartbeatRunnable, PBAT_HEARTBEAT_MS)
+    }
+
+    private fun stopPbatHeartbeat() {
+        heartbeatStarted = false
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatHandler.removeCallbacks(heartbeatIoTimeoutRunnable)
+        heartbeatInFlight.set(false)
+        heartbeatIoTimedOut.set(true)
+    }
+
+    private fun sendPbatHeartbeatBestEffort() {
+        val tcp = transport
+        if (tcp == null) {
+            Log.i(TAG, "PBAT heartbeat skip: no transport")
+            return
+        }
+        val percent = BatteryReader.readPercent(this)
+        if (percent == null) {
+            Log.i(TAG, "PBAT heartbeat skip: battery unavailable")
+            return
+        }
+        heartbeatIoTimedOut.set(false)
+        heartbeatHandler.removeCallbacks(heartbeatIoTimeoutRunnable)
+        heartbeatHandler.postDelayed(heartbeatIoTimeoutRunnable, PBAT_HEARTBEAT_IO_TIMEOUT_MS)
+        try {
+            if (!tcp.isConnected) {
+                tcp.connect()
+                tcp.sendPdev(settings.deviceCode)
+            }
+            tcp.sendPbat(percent)
+            if (heartbeatIoTimedOut.get()) {
+                return
+            }
+            Log.i(TAG, "PBAT heartbeat sent: $percent")
+        } catch (e: Exception) {
+            if (!heartbeatIoTimedOut.get()) {
+                Log.i(TAG, "PBAT heartbeat failed: ${e.message ?: e.javaClass.simpleName}")
+                try { tcp.close() } catch (_: Exception) {}
+            }
+        } finally {
+            heartbeatIoTimedOut.set(true)
+            heartbeatHandler.removeCallbacks(heartbeatIoTimeoutRunnable)
         }
     }
 
@@ -286,11 +391,13 @@ class TrackerService : Service() {
 
     private fun stopSelfSafely() {
         job?.cancel()
+        stopPbatHeartbeat()
         stopLocationUpdates()
         transport?.close()
         transport = null
         coordinator = null
         stateStore.markStopped()
+        releaseTrackingWakeLock()
         broadcastStatus("Stopped", null, null, "-", null, 0)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -348,6 +455,8 @@ class TrackerService : Service() {
         private const val TAG = "EcoTrackTracker"
         private const val CHANNEL_ID = "eco_track_tracking"
         private const val NOTIF_ID = 10001
+        private const val PBAT_HEARTBEAT_MS = 30_000L
+        private const val PBAT_HEARTBEAT_IO_TIMEOUT_MS = 8_000L
 
         const val ACTION_START = "com.ecotrack.mobiletracker.action.START"
         const val ACTION_STOP = "com.ecotrack.mobiletracker.action.STOP"

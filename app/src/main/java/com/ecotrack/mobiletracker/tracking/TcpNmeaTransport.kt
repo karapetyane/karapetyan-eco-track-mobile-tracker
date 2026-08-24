@@ -26,6 +26,10 @@ class TcpNmeaTransport(
         clientOrThrow().sendLine(NmeaBuilder.pdev(deviceCode))
     }
 
+    fun sendPbat(batteryPercent: Int) {
+        clientOrThrow().sendLine(NmeaBuilder.pbat(batteryPercent))
+    }
+
     override fun sendLive(sample: GpsSample, batteryPercent: Int?) {
         val tcp = clientOrThrow()
         if (batteryPercent != null) {
