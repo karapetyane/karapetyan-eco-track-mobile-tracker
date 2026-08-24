@@ -10,7 +10,7 @@ import android.content.Intent
 import android.location.Location
 import android.os.Build
 import android.os.IBinder
-import android.os.SystemClock
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ecotrack.mobiletracker.MainActivity
@@ -18,21 +18,19 @@ import com.ecotrack.mobiletracker.data.OfflineGapDatabase
 import com.ecotrack.mobiletracker.data.RoomOfflinePointStore
 import com.ecotrack.mobiletracker.data.Settings
 import com.ecotrack.mobiletracker.data.TrackingStateStore
-import com.google.android.gms.location.CurrentLocationRequest
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
-import kotlin.coroutines.resume
 
 class TrackerService : Service() {
 
@@ -51,6 +49,23 @@ class TrackerService : Service() {
     private var sessionId: String = ""
     private var coordinator: TrackingCoordinator? = null
     private var transport: TcpNmeaTransport? = null
+    private var locationUpdatesActive = false
+    private var lastAcceptedElapsedRealtimeNanos: Long = 0L
+    private var lastAcceptedTimeMillis: Long = 0L
+
+    private val fusedClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
+
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            val loc = result.lastLocation
+            if (loc == null) {
+                gpsDiag("GPS: callback, no usable location")
+                return
+            }
+            gpsDiag("GPS: callback with location")
+            scope.launch { onFreshLocation(loc) }
+        }
+    }
 
     private val sentFmt = DateTimeFormatter.ISO_OFFSET_DATE_TIME.withZone(ZoneOffset.UTC)
 
@@ -76,6 +91,7 @@ class TrackerService : Service() {
 
     override fun onDestroy() {
         job?.cancel()
+        stopLocationUpdates()
         transport?.close()
         super.onDestroy()
     }
@@ -120,7 +136,10 @@ class TrackerService : Service() {
 
     private fun startLoop(clearPreviousSessionQueue: Boolean) {
         job?.cancel()
+        stopLocationUpdates()
         transport?.close()
+        lastAcceptedElapsedRealtimeNanos = 0L
+        lastAcceptedTimeMillis = 0L
         val tcp = TcpNmeaTransport(settings.host, settings.port)
         transport = tcp
         val coord = TrackingCoordinator(
@@ -137,67 +156,117 @@ class TrackerService : Service() {
                 Log.i(TAG, "Explicit Start: new session $sessionId; previous offline queue cleared")
             }
             broadcastStatus("Starting…", null, null, "-", null, coord.pendingCount())
-            val intervalMs = settings.intervalSeconds * 1000L
+            startLocationUpdates()
+        }
+    }
 
-            while (isActive) {
-                val tickStarted = SystemClock.elapsedRealtime()
-                val loc = getCurrentLocationBestEffort()
-                val sample = loc?.let { toSample(it) }
-                val battery = BatteryReader.readPercent(this@TrackerService)
-                val result = coord.onTick(sample, battery)
-
-                if (result.droppedOldest > 0) {
-                    Log.w(
-                        TAG,
-                        "Offline queue at cap ${QueueBounds.MAX_PENDING_POINTS}; dropped ${result.droppedOldest} oldest point(s)",
-                    )
+    private fun startLocationUpdates() {
+        stopLocationUpdates()
+        val intervalMs = settings.intervalSeconds.coerceAtLeast(1) * 1000L
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
+            .setMinUpdateIntervalMillis(intervalMs)
+            .setMaxUpdateAgeMillis(intervalMs)
+            .build()
+        gpsDiag("GPS: registering")
+        try {
+            @Suppress("MissingPermission")
+            fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+                .addOnSuccessListener {
+                    gpsDiag("GPS: registered, waiting for fix")
                 }
-
-                val pending = result.pendingCount
-                when {
-                    sample == null -> {
-                        broadcastStatus(
-                            if (result.connected) "Connected (waiting for GPS)" else "Offline (waiting for GPS)",
-                            null,
-                            null,
-                            "-",
-                            null,
-                            pending,
-                        )
-                        updateNotification(if (result.connected) "Waiting for GPS…" else "Offline — waiting for GPS")
-                    }
-                    result.usedFastPath -> {
-                        val sentAt = sentFmt.format(sample.recordedAt)
-                        broadcastStatus("Connected (sending)", sample.latitude, sample.longitude, sentAt, battery, pending)
-                        updateNotification("Sending: ${sample.latitude}, ${sample.longitude}")
-                    }
-                    result.replayedCount > 0 -> {
-                        broadcastStatus(
-                            "Replaying offline gap ($pending left)",
-                            sample.latitude,
-                            sample.longitude,
-                            sentFmt.format(sample.recordedAt),
-                            battery,
-                            pending,
-                        )
-                        updateNotification("Replaying gap • $pending pending")
-                    }
-                    else -> {
-                        broadcastStatus(
-                            "Offline (queued)",
-                            sample.latitude,
-                            sample.longitude,
-                            "-",
-                            battery,
-                            pending,
-                        )
-                        updateNotification("Offline — queued $pending")
-                    }
+                .addOnFailureListener { e ->
+                    Log.w(TAG, "Location updates registration failed: ${e.message}")
+                    gpsDiag("GPS registration failed: ${(e.message ?: e.javaClass.simpleName).take(80)}")
                 }
+            locationUpdatesActive = true
+        } catch (_: SecurityException) {
+            Log.w(TAG, "Location updates not started: missing permission")
+            gpsDiag("GPS permission error")
+        }
+    }
 
-                val elapsed = SystemClock.elapsedRealtime() - tickStarted
-                val remaining = intervalMs - elapsed
-                if (remaining > 0) delay(remaining)
+    private fun gpsDiag(status: String) {
+        broadcastStatus(status, null, null, "-", null, 0)
+    }
+
+    private fun stopLocationUpdates() {
+        try {
+            fusedClient.removeLocationUpdates(locationCallback)
+        } catch (_: Exception) {
+        }
+        locationUpdatesActive = false
+    }
+
+    private fun onFreshLocation(location: Location) {
+        if (!isNewPhysicalFix(location)) return
+        rememberAcceptedFix(location)
+        val coord = coordinator ?: return
+        val sample = toSample(location)
+        val battery = BatteryReader.readPercent(this)
+        val result = coord.onTick(sample, battery)
+        applyTickResult(sample, battery, result)
+    }
+
+    private fun isNewPhysicalFix(location: Location): Boolean {
+        val elapsed = location.elapsedRealtimeNanos
+        if (elapsed > 0L && lastAcceptedElapsedRealtimeNanos > 0L &&
+            elapsed == lastAcceptedElapsedRealtimeNanos
+        ) {
+            return false
+        }
+        if (elapsed <= 0L) {
+            val time = location.time
+            if (time > 0L && lastAcceptedTimeMillis > 0L && time == lastAcceptedTimeMillis) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun rememberAcceptedFix(location: Location) {
+        if (location.elapsedRealtimeNanos > 0L) {
+            lastAcceptedElapsedRealtimeNanos = location.elapsedRealtimeNanos
+        }
+        if (location.time > 0L) {
+            lastAcceptedTimeMillis = location.time
+        }
+    }
+
+    private fun applyTickResult(sample: GpsSample, battery: Int?, result: TickResult) {
+        if (result.droppedOldest > 0) {
+            Log.w(
+                TAG,
+                "Offline queue at cap ${QueueBounds.MAX_PENDING_POINTS}; dropped ${result.droppedOldest} oldest point(s)",
+            )
+        }
+        val pending = result.pendingCount
+        when {
+            result.usedFastPath -> {
+                val sentAt = sentFmt.format(sample.recordedAt)
+                broadcastStatus("Connected (sending)", sample.latitude, sample.longitude, sentAt, battery, pending)
+                updateNotification("Sending: ${sample.latitude}, ${sample.longitude}")
+            }
+            result.replayedCount > 0 -> {
+                broadcastStatus(
+                    "Replaying offline gap ($pending left)",
+                    sample.latitude,
+                    sample.longitude,
+                    sentFmt.format(sample.recordedAt),
+                    battery,
+                    pending,
+                )
+                updateNotification("Replaying gap • $pending pending")
+            }
+            else -> {
+                broadcastStatus(
+                    "Offline (queued)",
+                    sample.latitude,
+                    sample.longitude,
+                    "-",
+                    battery,
+                    pending,
+                )
+                updateNotification("Offline — queued $pending")
             }
         }
     }
@@ -215,26 +284,9 @@ class TrackerService : Service() {
         )
     }
 
-    private suspend fun getCurrentLocationBestEffort(): Location? {
-        val client = LocationServices.getFusedLocationProviderClient(this)
-        return try {
-            val req = CurrentLocationRequest.Builder()
-                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-                .setDurationMillis(7000)
-                .build()
-            @Suppress("MissingPermission")
-            val task = client.getCurrentLocation(req, null)
-            suspendCancellableCoroutine { cont ->
-                task.addOnSuccessListener { cont.resume(it) }
-                task.addOnFailureListener { cont.resume(null) }
-            }
-        } catch (_: SecurityException) {
-            null
-        }
-    }
-
     private fun stopSelfSafely() {
         job?.cancel()
+        stopLocationUpdates()
         transport?.close()
         transport = null
         coordinator = null
