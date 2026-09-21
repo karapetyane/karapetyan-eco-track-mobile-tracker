@@ -46,7 +46,6 @@ class TrackerService : Service() {
     private val heartbeatIoTimeoutRunnable = Runnable {
         if (!heartbeatIoTimedOut.compareAndSet(false, true)) return@Runnable
         Log.i(TAG, "PBAT heartbeat failed: timeout")
-        try { transport?.close() } catch (_: Exception) {}
     }
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
@@ -71,14 +70,13 @@ class TrackerService : Service() {
     private lateinit var pointStore: RoomOfflinePointStore
 
     private var settings: Settings = Settings(
-        host = Settings.DEFAULT_HOST,
-        port = Settings.DEFAULT_PORT,
+        telemetryApiKey = Settings.DEFAULT_TELEMETRY_API_KEY,
         deviceCode = Settings.DEFAULT_DEVICE_CODE,
         intervalSeconds = Settings.DEFAULT_INTERVAL_SECONDS,
     )
     private var sessionId: String = ""
     private var coordinator: TrackingCoordinator? = null
-    private var transport: TcpNmeaTransport? = null
+    private var transport: TelemetryTransport? = null
     private var locationUpdatesActive = false
     private var lastAcceptedElapsedRealtimeNanos: Long = 0L
     private var lastAcceptedTimeMillis: Long = 0L
@@ -159,8 +157,7 @@ class TrackerService : Service() {
 
     private fun settingsFromIntent(intent: Intent): Settings {
         return Settings(
-            host = intent.getStringExtra(EXTRA_HOST) ?: Settings.DEFAULT_HOST,
-            port = intent.getIntExtra(EXTRA_PORT, Settings.DEFAULT_PORT),
+            telemetryApiKey = intent.getStringExtra(EXTRA_TELEMETRY_API_KEY) ?: Settings.DEFAULT_TELEMETRY_API_KEY,
             deviceCode = intent.getStringExtra(EXTRA_DEVICE_CODE) ?: Settings.DEFAULT_DEVICE_CODE,
             intervalSeconds = intent.getLongExtra(EXTRA_INTERVAL_SECONDS, Settings.DEFAULT_INTERVAL_SECONDS)
                 .coerceAtLeast(1),
@@ -174,13 +171,17 @@ class TrackerService : Service() {
         transport?.close()
         lastAcceptedElapsedRealtimeNanos = 0L
         lastAcceptedTimeMillis = 0L
-        val tcp = TcpNmeaTransport(settings.host, settings.port)
-        transport = tcp
+        val http = HttpTelemetryTransport(
+            ingestUrl = Settings.DEFAULT_INGEST_URL,
+            deviceCode = settings.deviceCode,
+            apiKeyProvider = { settings.telemetryApiKey },
+        )
+        transport = http
         val coord = TrackingCoordinator(
             sessionId = sessionId,
             deviceCode = settings.deviceCode,
             store = pointStore,
-            transport = tcp,
+            transport = http,
         )
         coordinator = coord
         acquireTrackingWakeLock()
@@ -193,7 +194,7 @@ class TrackerService : Service() {
             broadcastStatus("Starting…", null, null, "-", null, coord.pendingCount())
             startLocationUpdates()
         }
-        startPbatHeartbeat()
+        // TCP $PBAT heartbeat retired with HTTPS telemetry migration (no TCP/9100 path).
     }
 
     private fun acquireTrackingWakeLock() {
@@ -256,38 +257,8 @@ class TrackerService : Service() {
     }
 
     private fun sendPbatHeartbeatBestEffort() {
-        val tcp = transport
-        if (tcp == null) {
-            Log.i(TAG, "PBAT heartbeat skip: no transport")
-            return
-        }
-        val percent = BatteryReader.readPercent(this)
-        if (percent == null) {
-            Log.i(TAG, "PBAT heartbeat skip: battery unavailable")
-            return
-        }
-        heartbeatIoTimedOut.set(false)
-        heartbeatHandler.removeCallbacks(heartbeatIoTimeoutRunnable)
-        heartbeatHandler.postDelayed(heartbeatIoTimeoutRunnable, PBAT_HEARTBEAT_IO_TIMEOUT_MS)
-        try {
-            if (!tcp.isConnected) {
-                tcp.connect()
-                tcp.sendPdev(settings.deviceCode)
-            }
-            tcp.sendPbat(percent)
-            if (heartbeatIoTimedOut.get()) {
-                return
-            }
-            Log.i(TAG, "PBAT heartbeat sent: $percent")
-        } catch (e: Exception) {
-            if (!heartbeatIoTimedOut.get()) {
-                Log.i(TAG, "PBAT heartbeat failed: ${e.message ?: e.javaClass.simpleName}")
-                try { tcp.close() } catch (_: Exception) {}
-            }
-        } finally {
-            heartbeatIoTimedOut.set(true)
-            heartbeatHandler.removeCallbacks(heartbeatIoTimeoutRunnable)
-        }
+        // Retained for lifecycle safety; HTTPS ingest has no PBAT equivalent on this path.
+        Log.i(TAG, "PBAT heartbeat skip: https transport")
     }
 
     private fun gpsDiag(status: String) {
@@ -386,6 +357,8 @@ class TrackerService : Service() {
             speedMps = if (location.hasSpeed()) location.speed.toDouble() else null,
             bearingDeg = if (location.hasBearing()) location.bearing.toDouble() else null,
             altitudeM = if (location.hasAltitude()) location.altitude else null,
+            accuracyM = if (location.hasAccuracy()) location.accuracy.toDouble() else null,
+            messageId = UUID.randomUUID().toString(),
         )
     }
 
@@ -462,8 +435,7 @@ class TrackerService : Service() {
         const val ACTION_STOP = "com.ecotrack.mobiletracker.action.STOP"
         const val ACTION_STATUS = "com.ecotrack.mobiletracker.action.STATUS"
 
-        const val EXTRA_HOST = "host"
-        const val EXTRA_PORT = "port"
+        const val EXTRA_TELEMETRY_API_KEY = "telemetryApiKey"
         const val EXTRA_DEVICE_CODE = "deviceCode"
         const val EXTRA_INTERVAL_SECONDS = "intervalSeconds"
         const val EXTRA_EXPLICIT_START = "explicitStart"
@@ -479,8 +451,7 @@ class TrackerService : Service() {
             val i = Intent(context, TrackerService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_EXPLICIT_START, true)
-                putExtra(EXTRA_HOST, settings.host)
-                putExtra(EXTRA_PORT, settings.port)
+                putExtra(EXTRA_TELEMETRY_API_KEY, settings.telemetryApiKey)
                 putExtra(EXTRA_DEVICE_CODE, settings.deviceCode)
                 putExtra(EXTRA_INTERVAL_SECONDS, settings.intervalSeconds)
             }

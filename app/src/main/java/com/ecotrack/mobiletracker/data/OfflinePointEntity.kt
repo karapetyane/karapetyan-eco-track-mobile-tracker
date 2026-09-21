@@ -20,4 +20,6 @@ data class OfflinePointEntity(
     val speedMps: Double?,
     val bearingDeg: Double?,
     val altitudeM: Double?,
+    val accuracyM: Double?,
+    val messageId: String,
 )

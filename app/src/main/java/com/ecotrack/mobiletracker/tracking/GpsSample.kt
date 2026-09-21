@@ -9,9 +9,14 @@ data class GpsSample(
     val speedMps: Double? = null,
     val bearingDeg: Double? = null,
     val altitudeM: Double? = null,
+    val accuracyM: Double? = null,
+    val messageId: String,
 ) {
     val speedKnots: Double?
         get() = speedMps?.takeIf { it >= 0 }?.let { it * 1.943844 }
+
+    val speedKmh: Double?
+        get() = speedMps?.takeIf { it >= 0 }?.let { it * 3.6 }
 }
 
 object LocationTimestamps {

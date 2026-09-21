@@ -16,20 +16,12 @@
             android:textStyle="bold" />
 
         <EditText
-            android:id="@+id/hostEdit"
+            android:id="@+id/telemetryApiKeyEdit"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Host"
-            android:inputType="text"
-            android:text="167.233.232.174" />
-
-        <EditText
-            android:id="@+id/portEdit"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Port"
-            android:inputType="number"
-            android:text="9100" />
+            android:hint="GPS telemetry API key"
+            android:inputType="textPassword"
+            android:importantForAutofill="no" />
 
         <EditText
             android:id="@+id/deviceCodeEdit"
@@ -113,4 +105,3 @@
             android:text="Անցանց կետեր: 0" />
     </LinearLayout>
 </ScrollView>
-

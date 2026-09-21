@@ -22,8 +22,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var settingsStore: SettingsStore
 
-    private lateinit var hostEdit: EditText
-    private lateinit var portEdit: EditText
+    private lateinit var telemetryApiKeyEdit: EditText
     private lateinit var deviceCodeEdit: EditText
     private lateinit var intervalEdit: EditText
 
@@ -62,8 +61,7 @@ class MainActivity : AppCompatActivity() {
 
         settingsStore = SettingsStore(this)
 
-        hostEdit = findViewById(R.id.hostEdit)
-        portEdit = findViewById(R.id.portEdit)
+        telemetryApiKeyEdit = findViewById(R.id.telemetryApiKeyEdit)
         deviceCodeEdit = findViewById(R.id.deviceCodeEdit)
         intervalEdit = findViewById(R.id.intervalEdit)
 
@@ -75,8 +73,7 @@ class MainActivity : AppCompatActivity() {
         pendingText = findViewById(R.id.pendingText)
 
         val settings = settingsStore.load()
-        hostEdit.setText(settings.host)
-        portEdit.setText(settings.port.toString())
+        telemetryApiKeyEdit.setText(settings.telemetryApiKey)
         deviceCodeEdit.setText(settings.deviceCode)
         intervalEdit.setText(settings.intervalSeconds.toString())
 
@@ -109,11 +106,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun readSettingsFromUi(): Settings {
-        val host = hostEdit.text?.toString()?.trim().orEmpty().ifEmpty { Settings.DEFAULT_HOST }
-        val port = portEdit.text?.toString()?.toIntOrNull() ?: Settings.DEFAULT_PORT
+        val telemetryApiKey = telemetryApiKeyEdit.text?.toString().orEmpty()
         val deviceCode = deviceCodeEdit.text?.toString()?.trim().orEmpty().ifEmpty { Settings.DEFAULT_DEVICE_CODE }
         val intervalSeconds = intervalEdit.text?.toString()?.toLongOrNull()?.coerceAtLeast(1) ?: Settings.DEFAULT_INTERVAL_SECONDS
-        return Settings(host = host, port = port, deviceCode = deviceCode, intervalSeconds = intervalSeconds)
+        return Settings(
+            telemetryApiKey = telemetryApiKey,
+            deviceCode = deviceCode,
+            intervalSeconds = intervalSeconds,
+        )
     }
 
     private fun requestPermissionsIfNeeded() {
@@ -132,7 +132,6 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 29 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED
         ) {
-            // Ask background later if user granted fine location; for v1 we request directly to keep it simple.
             needed += Manifest.permission.ACCESS_BACKGROUND_LOCATION
         }
 
@@ -141,4 +140,3 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
-

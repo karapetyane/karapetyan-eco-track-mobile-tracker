@@ -280,6 +280,8 @@ class TrackingCoordinatorTest {
         speedMps = 1.0,
         bearingDeg = 90.0,
         altitudeM = 100.0,
+        accuracyM = 5.0,
+        messageId = "msg-$t",
     )
 
     private fun remainingDelayMs(intervalMs: Long, elapsedMs: Long): Long =

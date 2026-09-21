@@ -11,6 +11,8 @@ data class QueuedPoint(
     val speedMps: Double? = null,
     val bearingDeg: Double? = null,
     val altitudeM: Double? = null,
+    val accuracyM: Double? = null,
+    val messageId: String,
 ) {
     fun toSample(): GpsSample = GpsSample(
         recordedAt = Instant.ofEpochMilli(recordedAtMillis),
@@ -19,6 +21,8 @@ data class QueuedPoint(
         speedMps = speedMps,
         bearingDeg = bearingDeg,
         altitudeM = altitudeM,
+        accuracyM = accuracyM,
+        messageId = messageId,
     )
 
     companion object {
@@ -30,6 +34,8 @@ data class QueuedPoint(
             speedMps = sample.speedMps,
             bearingDeg = sample.bearingDeg,
             altitudeM = sample.altitudeM,
+            accuracyM = sample.accuracyM,
+            messageId = sample.messageId,
         )
     }
 }

@@ -16,6 +16,8 @@ class RoomOfflinePointStore(
                 speedMps = point.speedMps,
                 bearingDeg = point.bearingDeg,
                 altitudeM = point.altitudeM,
+                accuracyM = point.accuracyM,
+                messageId = point.messageId,
             ),
         )
     }
@@ -43,5 +45,7 @@ class RoomOfflinePointStore(
         speedMps = speedMps,
         bearingDeg = bearingDeg,
         altitudeM = altitudeM,
+        accuracyM = accuracyM,
+        messageId = messageId,
     )
 }
